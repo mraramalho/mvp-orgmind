@@ -1,0 +1,169 @@
+name: ${COMPOSE_PROJECT_NAME:-orgmind}
+
+services:
+  backend:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      APP_PORT: "8080"
+      APP_VERSION: ${APP_VERSION:-dev}
+      DATABASE_URL: postgres://${POSTGRES_USER:-orgmind}:${POSTGRES_PASSWORD:-orgmind_dev_only}@postgres:5432/${POSTGRES_DB:-orgmind}?sslmode=disable
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-orgmind}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-orgmind_dev_only_change_me}
+      MINIO_BUCKET: ${MINIO_BUCKET:-orgmind-artifacts}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./backend:/workspace
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    init: true
+
+  frontend:
+    build:
+      context: ./frontend
+      target: development
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/workspace
+      - frontend-node-modules:/workspace/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    init: true
+
+  postgres:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-orgmind}
+      POSTGRES_USER: ${POSTGRES_USER:-orgmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orgmind_dev_only}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-orgmind}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-orgmind_dev_only_change_me}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-orgmind}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-orgmind_dev_only_change_me}
+      MINIO_BUCKET: ${MINIO_BUCKET:-orgmind-artifacts}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+
+  backend-test:
+    profiles: ["tools"]
+    build:
+      context: ./backend
+      target: test
+    volumes:
+      - ./backend:/workspace
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    command: go test -cover ./...
+
+  backend-lint:
+    profiles: ["tools"]
+    build:
+      context: ./backend
+      target: test
+    volumes:
+      - ./backend:/workspace
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    command: ["sh", "-ec", "test -z \"$(gofmt -l .)\" && go vet ./..."]
+
+  frontend-test:
+    profiles: ["tools"]
+    build:
+      context: ./frontend
+      target: test
+    volumes:
+      - ./frontend:/workspace
+      - frontend-node-modules:/workspace/node_modules
+    command: npm test
+
+  frontend-lint:
+    profiles: ["tools"]
+    build:
+      context: ./frontend
+      target: test
+    volumes:
+      - ./frontend:/workspace
+      - frontend-node-modules:/workspace/node_modules
+    command: ["sh", "-ec", "npm run lint && npm run build"]
+
+  smoke:
+    profiles: ["tools"]
+    image: curlimages/curl:8.14.1
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        curl --fail --silent --show-error http://backend:8080/health | grep '"status":"ok"'
+        curl --fail --silent --show-error http://frontend:5173/api/health | grep '"status":"ok"'
+
+volumes:
+  postgres-data:
+  minio-data:
+  go-mod-cache:
+  go-build-cache:
+  frontend-node-modules:

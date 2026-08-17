@@ -1,0 +1,16 @@
+.env
+.DS_Store
+Thumbs.db
+
+# Build outputs
+backend/bin/
+frontend/dist/
+frontend/coverage/
+
+# Local dependencies and caches
+frontend/node_modules/
+*.log
+
+# IDE settings
+.idea/
+.vscode/
